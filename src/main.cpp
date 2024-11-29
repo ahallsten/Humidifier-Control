@@ -6,7 +6,7 @@
 #include <Adafruit_SSD1306.h>
 #include "Adafruit_INA3221.h"
 #include <ESP8266WiFi.h>
-#include <PubSubClient.h>
+// #include <PubSubClient.h>
 
 /*DEFINITIONS & VARIABLES*/
 /*===========================================*/
@@ -21,19 +21,19 @@ Adafruit_INA3221 ina3221;
 // WiFi and MQTT Configuration
 const char *ssid = "Hallsten";
 const char *password = "Spectrum600!";
-const char *mqtt_server = "Your_MQTT_BROKER_IP";
-const char *mqtt_user = "Your_MQTT_USERNAME";
-const char *mqtt_password = "Your_MQTT_PASSWORD";
+// const char *mqtt_server = "Your_MQTT_BROKER_IP";
+// const char *mqtt_user = "Your_MQTT_USERNAME";
+// const char *mqtt_password = "Your_MQTT_PASSWORD";
 
-// MQTT Topics
-const char *tempTopic = "home/humidity_controller/temperature";
-const char *rhTopic = "home/humidity_controller/humidity";
-const char *pressureTopic = "home/humidity_controller/pressure";
-const char *relayTopic = "home/humidity_controller/relay_state";
+// // MQTT Topics
+// const char *tempTopic = "home/humidity_controller/temperature";
+// const char *rhTopic = "home/humidity_controller/humidity";
+// const char *pressureTopic = "home/humidity_controller/pressure";
+// const char *relayTopic = "home/humidity_controller/relay_state";
 
 // MQTT Client
 WiFiClient espClient;
-PubSubClient client(espClient);
+// PubSubClient client(espClient);
 
 // Pins
 #define BLOWER_FAN_PIN D1
@@ -99,24 +99,24 @@ void setupWiFi()
   Serial.println("WiFi connected!");
 }
 
-void reconnectMQTT()
-{
-  while (!client.connected())
-  {
-    Serial.print("Attempting MQTT connection...");
-    if (client.connect("ESP8266Client", mqtt_user, mqtt_password))
-    {
-      Serial.println("connected");
-    }
-    else
-    {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again in 5 seconds");
-      delay(5000);
-    }
-  }
-}
+// void reconnectMQTT()
+// {
+//   while (!client.connected())
+//   {
+//     Serial.print("Attempting MQTT connection...");
+//     if (client.connect("ESP8266Client", mqtt_user, mqtt_password))
+//     {
+//       Serial.println("connected");
+//     }
+//     else
+//     {
+//       Serial.print("failed, rc=");
+//       Serial.print(client.state());
+//       Serial.println(" try again in 5 seconds");
+//       delay(5000);
+//     }
+//   }
+// }
 
 /*SETUP*/
 /*===========================================*/
@@ -128,13 +128,14 @@ void setup()
 
   Serial.begin(115200);
   setupWiFi();
-  client.setServer(mqtt_server, 1883);
+  // client.setServer(mqtt_server, 1883);
 
   if (!display.begin(SSD1306_PAGEADDR, 0x3C))
   {
     Serial.println(F("SSD1306 allocation failed"));
     while (true)
-      ;
+      Serial.println(F("shit"));
+    ;
   }
   display.clearDisplay();
   display.display();
@@ -179,19 +180,19 @@ void readSensors()
   bufferIndex = (bufferIndex + 1) % BUFFER_SIZE;
 }
 
-void publishToMQTT()
-{
-  if (!client.connected())
-  {
-    reconnectMQTT();
-  }
-  client.loop();
+// void publishToMQTT()
+// {
+//   if (!client.connected())
+//   {
+//     reconnectMQTT();
+//   }
+//   client.loop();
 
-  client.publish(tempTopic, String(temperature).c_str(), true);
-  client.publish(rhTopic, String(humidity).c_str(), true);
-  client.publish(pressureTopic, String(pressure).c_str(), true);
-  client.publish(relayTopic, relayState ? "ON" : "OFF", true);
-}
+//   client.publish(tempTopic, String(temperature).c_str(), true);
+//   client.publish(rhTopic, String(humidity).c_str(), true);
+//   client.publish(pressureTopic, String(pressure).c_str(), true);
+//   client.publish(relayTopic, relayState ? "ON" : "OFF", true);
+// }
 
 /*LOOP*/
 /*===========================================*/
@@ -205,11 +206,11 @@ void loop()
     readSensors();
   }
 
-  if (currentTime - lastMqttPublishTime >= mqttPublishInterval)
-  {
-    lastMqttPublishTime = currentTime;
-    publishToMQTT();
-  }
+  // if (currentTime - lastMqttPublishTime >= mqttPublishInterval)
+  // {
+  //   lastMqttPublishTime = currentTime;
+  //   publishToMQTT();
+  // }
 
   if (currentTime - lastDisplayUpdateTime >= displayUpdateInterval)
   {
