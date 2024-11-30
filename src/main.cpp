@@ -39,6 +39,7 @@ WiFiClient espClient;
 // Pins
 #define BLOWER_FAN_PIN D4
 #define HUMIDIFIER_RELAY_PIN D3
+#define BUTTON_PIN D5
 
 // Calibration
 #define TEMP_MIN_MA 4.0
@@ -72,16 +73,26 @@ const unsigned long relayToggleDelay = 30000;
 unsigned long lastSensorReadTime = 0;
 unsigned long lastMqttPublishTime = 0;
 unsigned long lastDisplayUpdateTime = 0;
+unsigned long lastSerialUpdateTime = 0;
 const unsigned long sensorReadInterval = 100;
 const unsigned long mqttPublishInterval = 5000;
 const unsigned long displayUpdateInterval = 200;
+const unsigned long SerialUpdateInterval = 20;
 
 // Moving average buffers
-#define BUFFER_SIZE 20
+#define BUFFER_SIZE 10
 float tempBuffer[BUFFER_SIZE] = {0};
 float rhBuffer[BUFFER_SIZE] = {0};
 float pressureBuffer[BUFFER_SIZE] = {0};
 int bufferIndex = 0;
+float tempCurrent = 0;
+float rhCurrent = 0;
+float pressureCurrent = 0;
+
+// ISR Variables
+volatile bool rawRead = false;               // Variable to toggle on button press
+volatile unsigned long lastDebounceTime = 0; // Tracks the last debounce time
+const unsigned long debounceDelay = 40;      // Debounce time in milliseconds
 
 /*SETUP FUNCTION DECLARATIONS*/
 /*===========================================*/
@@ -119,13 +130,28 @@ void setupWiFi()
 //   }
 // }
 
+// Interrupt Service Routine (ISR) for button press
+void IRAM_ATTR handleButtonPress()
+{
+  unsigned long currentTime = millis();
+  // Check if debounce time has passed
+  if (currentTime - lastDebounceTime > debounceDelay)
+  {
+    rawRead = !rawRead;             // Toggle the state of rawRead
+    lastDebounceTime = currentTime; // Update the last debounce time
+  }
+}
+
 /*SETUP*/
 /*===========================================*/
 void setup()
 {
   pinMode(BLOWER_FAN_PIN, INPUT);
   pinMode(HUMIDIFIER_RELAY_PIN, OUTPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP); // Use internal pull-up resistor
   digitalWrite(HUMIDIFIER_RELAY_PIN, LOW);
+
+  attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), handleButtonPress, FALLING);
 
   Serial.begin(115200);
   setupWiFi();
@@ -140,20 +166,21 @@ void setup()
   ina3221.setShuntResistance(0, 0.1);
   ina3221.setShuntResistance(1, 0.1);
   ina3221.setShuntResistance(2, 0.1);
-  ina3221.setAveragingMode(INA3221_AVG_64_SAMPLES);
+  ina3221.setAveragingMode(INA3221_AVG_4_SAMPLES);
   ina3221.setShuntVoltageConvTime(INA3221_CONVTIME_8MS);
 
   Serial.println(F("shit"));
 
-  if (!display.begin(SSD1306_EXTERNALVCC, 0x3C))
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C))
   {
     Serial.println(F("SSD1306 allocation failed"));
     while (true)
       Serial.println(F("shit"));
     ;
   }
-  display.clearDisplay();
   display.display();
+  delay(2000);
+  display.clearDisplay();
   Serial.println(F("finished SSD1306 setup"));
 }
 
@@ -176,9 +203,9 @@ float calculateAverage(float *buffer, int size)
 
 void readSensors()
 {
-  float tempCurrent = ina3221.getCurrentAmps(1);     // Channel 1
-  float rhCurrent = ina3221.getCurrentAmps(2);       // Channel 2
-  float pressureCurrent = ina3221.getCurrentAmps(3); // Channel 3
+  tempCurrent = 1000 * ina3221.getCurrentAmps(0);     // Channel 1
+  rhCurrent = 1000 * ina3221.getCurrentAmps(1);       // Channel 2
+  pressureCurrent = 1000 * ina3221.getCurrentAmps(2); // Channel 3
 
   tempBuffer[bufferIndex] = convertToRange(tempCurrent, TEMP_MIN_MA, TEMP_MAX_MA, TEMP_MIN_F, TEMP_MAX_F);
   rhBuffer[bufferIndex] = convertToRange(rhCurrent, RH_MIN_MA, RH_MAX_MA, RH_MIN, RH_MAX);
@@ -223,32 +250,66 @@ void updateRelay()
 
 void updateDisplay()
 {
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
+  if (!rawRead)
+  {
+    display.clearDisplay();
+    display.setTextSize(1.5);
+    display.setTextColor(SSD1306_WHITE);
 
-  display.setCursor(0, 0);
-  display.print("T:");
-  display.setCursor(90, 0);
-  display.printf("%6.1f F", temperature);
+    display.setCursor(0, 0);
+    display.print("Temp:");
+    display.setCursor(60, 0);
+    display.printf("%6.1f F", temperature);
 
-  display.setCursor(0, 16);
-  display.print("RH:");
-  display.setCursor(90, 16);
-  display.printf("%6.1f %%", humidity);
+    display.setCursor(0, 16);
+    display.print("RH:");
+    display.setCursor(60, 16);
+    display.printf("%6.1f %%", humidity);
 
-  display.setCursor(0, 32);
-  display.print("P:");
-  display.setCursor(90, 32);
-  display.printf("%6.1f psi", pressure);
+    display.setCursor(0, 32);
+    display.print("Press:");
+    display.setCursor(60, 32);
+    display.printf("%6.1f psi", pressure);
 
-  display.setCursor(0, 48);
-  display.print("RS:");
-  display.setCursor(90, 48);
-  display.print(relayState ? "ON" : "OFF");
+    display.setCursor(0, 48);
+    display.print("Relay:");
+    display.setCursor(60, 48);
+    display.print(relayState ? "ON" : "OFF");
 
-  display.display();
+    display.display();
+  }
+  else
+  {
+    display.clearDisplay();
+    display.setTextSize(1.5);
+    display.setTextColor(SSD1306_WHITE);
 
+    display.setCursor(0, 0);
+    display.print("RawT:");
+    display.setCursor(60, 0);
+    display.printf("%6.1f F", tempCurrent);
+
+    display.setCursor(0, 16);
+    display.print("RawRH:");
+    display.setCursor(60, 16);
+    display.printf("%6.1f %%", rhCurrent);
+
+    display.setCursor(0, 32);
+    display.print("RawP:");
+    display.setCursor(60, 32);
+    display.printf("%6.1f psi", pressureCurrent);
+
+    display.setCursor(0, 48);
+    display.print("Relay:");
+    display.setCursor(60, 48);
+    display.print(relayState ? "  ON" : "  OFF");
+
+    display.display();
+  }
+}
+
+void serialDisplay()
+{
   Serial.print("T: ");
   Serial.print(temperature);
   Serial.print("  ");
@@ -257,9 +318,18 @@ void updateDisplay()
   Serial.print("  ");
   Serial.print("P: ");
   Serial.print(pressure);
+  Serial.print("  ");
+
+  Serial.print("T: ");
+  Serial.print(tempCurrent);
+  Serial.print("  ");
+  Serial.print("RH: ");
+  Serial.print(humidity);
+  Serial.print("  ");
+  Serial.print("P: ");
+  Serial.print(pressureCurrent);
   Serial.println("  ");
 }
-
 // void publishToMQTT()
 // {
 //   if (!client.connected())
@@ -299,5 +369,19 @@ void loop()
   {
     lastDisplayUpdateTime = currentTime;
     updateDisplay();
+  }
+
+  // Serial
+  if (currentTime - lastSerialUpdateTime >= displayUpdateInterval)
+  {
+    lastSerialUpdateTime = currentTime;
+    updateDisplay();
+  }
+
+  // Button state
+  static bool lastState = rawRead;
+  if (rawRead != lastState)
+  {
+    lastState = rawRead;
   }
 }
