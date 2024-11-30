@@ -13,6 +13,7 @@
 // OLED display settings
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
+#define SCREEN_ADDRESS 0x3C
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 // INA3221 sensor
@@ -36,8 +37,8 @@ WiFiClient espClient;
 // PubSubClient client(espClient);
 
 // Pins
-#define BLOWER_FAN_PIN D1
-#define HUMIDIFIER_RELAY_PIN D2
+#define BLOWER_FAN_PIN D4
+#define HUMIDIFIER_RELAY_PIN D3
 
 // Calibration
 #define TEMP_MIN_MA 4.0
@@ -82,7 +83,7 @@ float rhBuffer[BUFFER_SIZE] = {0};
 float pressureBuffer[BUFFER_SIZE] = {0};
 int bufferIndex = 0;
 
-/*FUNCTION DECLARATIONS*/
+/*SETUP FUNCTION DECLARATIONS*/
 /*===========================================*/
 void setupWiFi()
 {
@@ -130,7 +131,21 @@ void setup()
   setupWiFi();
   // client.setServer(mqtt_server, 1883);
 
-  if (!display.begin(SSD1306_PAGEADDR, 0x3C))
+  if (!ina3221.begin())
+  {
+    Serial.println("Failed to initialize INA3221!");
+    while (true)
+      ;
+  }
+  ina3221.setShuntResistance(0, 0.1);
+  ina3221.setShuntResistance(1, 0.1);
+  ina3221.setShuntResistance(2, 0.1);
+  ina3221.setAveragingMode(INA3221_AVG_64_SAMPLES);
+  ina3221.setShuntVoltageConvTime(INA3221_CONVTIME_8MS);
+
+  Serial.println(F("shit"));
+
+  if (!display.begin(SSD1306_EXTERNALVCC, 0x3C))
   {
     Serial.println(F("SSD1306 allocation failed"));
     while (true)
@@ -139,15 +154,11 @@ void setup()
   }
   display.clearDisplay();
   display.display();
-
-  if (!ina3221.begin())
-  {
-    Serial.println("Failed to initialize INA3221!");
-    while (true)
-      ;
-  }
+  Serial.println(F("finished SSD1306 setup"));
 }
 
+/*LOOP FUNCTION DECLARATIONS*/
+/*===========================================*/
 float convertToRange(float input, float inputMin, float inputMax, float outputMin, float outputMax)
 {
   return (input - inputMin) * (outputMax - outputMin) / (inputMax - inputMin) + outputMin;
@@ -180,6 +191,75 @@ void readSensors()
   bufferIndex = (bufferIndex + 1) % BUFFER_SIZE;
 }
 
+void updateRelay()
+{
+  unsigned long currentTime = millis();
+
+  // Check if the blower fan is on and if enough time has passed since the last toggle
+  if (digitalRead(BLOWER_FAN_PIN) == HIGH && currentTime - lastRelayToggleTime >= relayToggleDelay)
+  {
+    float lowerLimit = humiditySetpoint - deadband;
+    float upperLimit = humiditySetpoint + deadband;
+
+    // Turn relay ON if humidity is below lower limit
+    if (!relayState && humidity < lowerLimit)
+    {
+      relayState = true;
+      digitalWrite(HUMIDIFIER_RELAY_PIN, HIGH);
+      lastRelayToggleTime = currentTime;
+      Serial.println("Relay On");
+    }
+
+    // Turn relay OFF if humidity is above upper limit
+    else if (relayState && humidity > upperLimit)
+    {
+      relayState = false;
+      digitalWrite(HUMIDIFIER_RELAY_PIN, LOW);
+      lastRelayToggleTime = currentTime;
+      Serial.println("Relay Off");
+    }
+  }
+}
+
+void updateDisplay()
+{
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setCursor(0, 0);
+  display.print("T:");
+  display.setCursor(90, 0);
+  display.printf("%6.1f F", temperature);
+
+  display.setCursor(0, 16);
+  display.print("RH:");
+  display.setCursor(90, 16);
+  display.printf("%6.1f %%", humidity);
+
+  display.setCursor(0, 32);
+  display.print("P:");
+  display.setCursor(90, 32);
+  display.printf("%6.1f psi", pressure);
+
+  display.setCursor(0, 48);
+  display.print("RS:");
+  display.setCursor(90, 48);
+  display.print(relayState ? "ON" : "OFF");
+
+  display.display();
+
+  Serial.print("T: ");
+  Serial.print(temperature);
+  Serial.print("  ");
+  Serial.print("RH: ");
+  Serial.print(humidity);
+  Serial.print("  ");
+  Serial.print("P: ");
+  Serial.print(pressure);
+  Serial.println("  ");
+}
+
 // void publishToMQTT()
 // {
 //   if (!client.connected())
@@ -187,7 +267,6 @@ void readSensors()
 //     reconnectMQTT();
 //   }
 //   client.loop();
-
 //   client.publish(tempTopic, String(temperature).c_str(), true);
 //   client.publish(rhTopic, String(humidity).c_str(), true);
 //   client.publish(pressureTopic, String(pressure).c_str(), true);
@@ -200,21 +279,25 @@ void loop()
 {
   unsigned long currentTime = millis();
 
+  // Sensors reading and
   if (currentTime - lastSensorReadTime >= sensorReadInterval)
   {
     lastSensorReadTime = currentTime;
     readSensors();
+    updateRelay();
   }
 
+  // MQTT Broker
   // if (currentTime - lastMqttPublishTime >= mqttPublishInterval)
   // {
   //   lastMqttPublishTime = currentTime;
   //   publishToMQTT();
   // }
 
+  // Display
   if (currentTime - lastDisplayUpdateTime >= displayUpdateInterval)
   {
     lastDisplayUpdateTime = currentTime;
-    // Update display code here...
+    updateDisplay();
   }
 }
