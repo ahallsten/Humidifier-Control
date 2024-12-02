@@ -5,6 +5,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_ADS1X15.h>
+#include <Adafruit_AM2315.h>
 // #include "Adafruit_INA3221.h"
 #include <ESP8266WiFi.h>
 // #include <PubSubClient.h>
@@ -22,6 +23,9 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 // ADS1115 ADS
 Adafruit_ADS1115 ads; /* Use this for the 16-bit version */
+
+// AM2315 Temp and RH Sensor
+Adafruit_AM2315 am2315;
 
 // WiFi and MQTT Configuration
 const char *ssid = "Hallsten";
@@ -62,9 +66,9 @@ WiFiClient espClient;
 #define PRESSURE_MIN_PSI 0.0
 #define PRESSURE_MAX_PSI 100.0
 
- #define TEMP_CAL_OFFSET -3.088
- #define RH_CAL_OFFSET 0.0
- #define PRESSURE_CAL_OFFSET 0.0
+#define TEMP_CAL_OFFSET -3.088
+#define RH_CAL_OFFSET 0.0
+#define PRESSURE_CAL_OFFSET 0.0
 
 // Deadband and Setpoint
 float humiditySetpoint = 50.0;
@@ -74,6 +78,8 @@ float deadband = 3.0;
 float temperature = 0.0;
 float humidity = 0.0;
 float pressure = 0.0;
+float am2315Temperature = 0;
+float am2315humidity = 0;
 bool relayState = false;
 unsigned long lastRelayToggleTime = 0;
 const unsigned long relayToggleDelay = 30000;
@@ -83,10 +89,12 @@ unsigned long lastSensorReadTime = 0;
 unsigned long lastMqttPublishTime = 0;
 unsigned long lastDisplayUpdateTime = 0;
 unsigned long lastSerialUpdateTime = 0;
+unsigned long lastAM2315ReadTime = 0;
 const unsigned long sensorReadInterval = 100;
 const unsigned long mqttPublishInterval = 5000;
 const unsigned long displayUpdateInterval = 200;
 const unsigned long SerialUpdateInterval = 20;
+const unsigned long AM2315ReadInterval = 600;
 
 // Moving average buffers
 #define BUFFER_SIZE 40
@@ -180,6 +188,7 @@ void setup()
   setupWiFi();
   // client.setServer(mqtt_server, 1883);
 
+  // INA3221 Setup
   // if (!ina3221.begin())
   // {
   //   Serial.println("Failed to initialize INA3221!");
@@ -192,6 +201,7 @@ void setup()
   // ina3221.setAveragingMode(INA3221_AVG_4_SAMPLES);
   // ina3221.setShuntVoltageConvTime(INA3221_CONVTIME_8MS);
 
+  // ADS1115 Setup
   if (!ads.begin())
   {
     Serial.println("Failed to initialize ADS.");
@@ -200,8 +210,17 @@ void setup()
   }
   ads.setDataRate(RATE_ADS1115_860SPS);
 
-  Serial.println(F("shit"));
+  // AM2315 Setup
+  Serial.println("AM2315 Test!");
+  if (!am2315.begin())
+  {
+    Serial.println("Sensor not found, check wiring & pullups!");
+    while (1)
+      ;
+  }
+  delay(2000);
 
+  Serial.println(F("SSD Setup"));
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C))
   {
     Serial.println(F("SSD1306 allocation failed"));
@@ -262,6 +281,15 @@ void readSensors()
   pressure = calculateAverage(pressureBuffer, BUFFER_SIZE);
 
   bufferIndex = (bufferIndex + 1) % BUFFER_SIZE;
+}
+
+void readAM2315()
+{
+  if (!am2315.readTemperatureAndHumidity(&temperature, &humidity))
+  {
+    Serial.println("Failed to read data from AM2315");
+    return;
+  }
 }
 
 void updateRelay()
@@ -398,6 +426,11 @@ void serialDisplay()
   Serial.print("  ");
   Serial.print(volts3);
   Serial.println("V");
+
+  Serial.print("Temp *C: ");
+  Serial.print(am2315Temperature);
+  Serial.print("RH %: ");
+  Serial.println(am2315humidity);
 }
 
 // void publishToMQTT()
@@ -419,12 +452,19 @@ void loop()
 {
   unsigned long currentTime = millis();
 
-  // Sensors reading and
+  // Sensors reading
   if (currentTime - lastSensorReadTime >= sensorReadInterval)
   {
     lastSensorReadTime = currentTime;
     readSensors();
     updateRelay();
+  }
+
+  // AM2315 reading
+  if (currentTime - lastAM2315ReadTime >= AM2315ReadInterval)
+  {
+    lastAM2315ReadTime = currentTime;
+    readAM2315();
   }
 
   // MQTT Broker
