@@ -4,7 +4,9 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include "Adafruit_INA3221.h"
+#include <Adafruit_ADS1X15.h>
+#include <Adafruit_AM2315.h>
+// #include "Adafruit_INA3221.h"
 #include <ESP8266WiFi.h>
 // #include <PubSubClient.h>
 
@@ -16,8 +18,14 @@
 #define SCREEN_ADDRESS 0x3C
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
-// INA3221 sensor
-Adafruit_INA3221 ina3221;
+// // INA3221 sensor
+// Adafruit_INA3221 ina3221;
+
+// ADS1115 ADS
+Adafruit_ADS1115 ads; /* Use this for the 16-bit version */
+
+// AM2315 Temp and RH Sensor
+Adafruit_AM2315 am2315;
 
 // WiFi and MQTT Configuration
 const char *ssid = "Hallsten";
@@ -40,6 +48,7 @@ WiFiClient espClient;
 #define BLOWER_FAN_PIN D4
 #define HUMIDIFIER_RELAY_PIN D3
 #define BUTTON_PIN D5
+// #define ALRT_READY D6
 
 // Calibration
 #define TEMP_MIN_MA 4.0
@@ -57,6 +66,10 @@ WiFiClient espClient;
 #define PRESSURE_MIN_PSI 0.0
 #define PRESSURE_MAX_PSI 100.0
 
+#define TEMP_CAL_OFFSET -3.088
+#define RH_CAL_OFFSET 0.0
+#define PRESSURE_CAL_OFFSET 0.0
+
 // Deadband and Setpoint
 float humiditySetpoint = 50.0;
 float deadband = 3.0;
@@ -65,6 +78,8 @@ float deadband = 3.0;
 float temperature = 0.0;
 float humidity = 0.0;
 float pressure = 0.0;
+float am2315Temperature = 0;
+float am2315humidity = 0;
 bool relayState = false;
 unsigned long lastRelayToggleTime = 0;
 const unsigned long relayToggleDelay = 30000;
@@ -74,13 +89,15 @@ unsigned long lastSensorReadTime = 0;
 unsigned long lastMqttPublishTime = 0;
 unsigned long lastDisplayUpdateTime = 0;
 unsigned long lastSerialUpdateTime = 0;
+unsigned long lastAM2315ReadTime = 0;
 const unsigned long sensorReadInterval = 100;
 const unsigned long mqttPublishInterval = 5000;
 const unsigned long displayUpdateInterval = 200;
 const unsigned long SerialUpdateInterval = 20;
+const unsigned long AM2315ReadInterval = 600;
 
 // Moving average buffers
-#define BUFFER_SIZE 10
+#define BUFFER_SIZE 40
 float tempBuffer[BUFFER_SIZE] = {0};
 float rhBuffer[BUFFER_SIZE] = {0};
 float pressureBuffer[BUFFER_SIZE] = {0};
@@ -88,11 +105,18 @@ int bufferIndex = 0;
 float tempCurrent = 0;
 float rhCurrent = 0;
 float pressureCurrent = 0;
+float tempCurrentRaw = 0;
+float rhCurrentRaw = 0;
+float pressureCurrentRaw = 0;
+float current3 = 0;
+int16_t adc0, adc1, adc2, adc3;
+float volts0, volts1, volts2, volts3;
 
 // ISR Variables
 volatile bool rawRead = false;               // Variable to toggle on button press
 volatile unsigned long lastDebounceTime = 0; // Tracks the last debounce time
 const unsigned long debounceDelay = 40;      // Debounce time in milliseconds
+volatile bool new_data = false;              // Flag for new ADS Data Ready
 
 /*SETUP FUNCTION DECLARATIONS*/
 /*===========================================*/
@@ -142,6 +166,11 @@ void IRAM_ATTR handleButtonPress()
   }
 }
 
+// void IRAM_ATTR NewDataReadyISR()
+// {
+//   new_data = true;
+// }
+
 /*SETUP*/
 /*===========================================*/
 void setup()
@@ -149,28 +178,49 @@ void setup()
   pinMode(BLOWER_FAN_PIN, INPUT);
   pinMode(HUMIDIFIER_RELAY_PIN, OUTPUT);
   pinMode(BUTTON_PIN, INPUT_PULLUP); // Use internal pull-up resistor
+  // pinMode(ALRT_READY, INPUT_PULLUP);
   digitalWrite(HUMIDIFIER_RELAY_PIN, LOW);
 
   attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), handleButtonPress, FALLING);
+  // attachInterrupt(digitalPinToInterrupt(ALRT_READY), NewDataReadyISR, FALLING);
 
   Serial.begin(115200);
   setupWiFi();
   // client.setServer(mqtt_server, 1883);
 
-  if (!ina3221.begin())
+  // INA3221 Setup
+  // if (!ina3221.begin())
+  // {
+  //   Serial.println("Failed to initialize INA3221!");
+  //   while (true)
+  //     ;
+  // }
+  // ina3221.setShuntResistance(0, 120);
+  // ina3221.setShuntResistance(1, 120);
+  // ina3221.setShuntResistance(2, 120);
+  // ina3221.setAveragingMode(INA3221_AVG_4_SAMPLES);
+  // ina3221.setShuntVoltageConvTime(INA3221_CONVTIME_8MS);
+
+  // ADS1115 Setup
+  if (!ads.begin())
   {
-    Serial.println("Failed to initialize INA3221!");
-    while (true)
+    Serial.println("Failed to initialize ADS.");
+    while (1)
       ;
   }
-  ina3221.setShuntResistance(0, 0.1);
-  ina3221.setShuntResistance(1, 0.1);
-  ina3221.setShuntResistance(2, 0.1);
-  ina3221.setAveragingMode(INA3221_AVG_4_SAMPLES);
-  ina3221.setShuntVoltageConvTime(INA3221_CONVTIME_8MS);
+  ads.setDataRate(RATE_ADS1115_860SPS);
 
-  Serial.println(F("shit"));
+  // AM2315 Setup
+  Serial.println("AM2315 Test!");
+  if (!am2315.begin())
+  {
+    Serial.println("Sensor not found, check wiring & pullups!");
+    while (1)
+      ;
+  }
+  delay(2000);
 
+  Serial.println(F("SSD Setup"));
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C))
   {
     Serial.println(F("SSD1306 allocation failed"));
@@ -186,9 +236,9 @@ void setup()
 
 /*LOOP FUNCTION DECLARATIONS*/
 /*===========================================*/
-float convertToRange(float input, float inputMin, float inputMax, float outputMin, float outputMax)
+float analogScaling(float input, float inputMin, float inputMax, float outputMin, float outputMax, float calOffset)
 {
-  return (input - inputMin) * (outputMax - outputMin) / (inputMax - inputMin) + outputMin;
+  return (input - inputMin) * (outputMax - outputMin) / (inputMax - inputMin) + outputMin + calOffset;
 }
 
 float calculateAverage(float *buffer, int size)
@@ -203,19 +253,43 @@ float calculateAverage(float *buffer, int size)
 
 void readSensors()
 {
-  tempCurrent = 1000 * ina3221.getCurrentAmps(0);     // Channel 1
-  rhCurrent = 1000 * ina3221.getCurrentAmps(1);       // Channel 2
-  pressureCurrent = 1000 * ina3221.getCurrentAmps(2); // Channel 3
+  // tempCurrent = 1000 * ina3221.getCurrentAmps(0);     // Channel 1
+  // rhCurrent = 1000 * ina3221.getCurrentAmps(1);       // Channel 2
+  // pressureCurrent = 1000 * ina3221.getCurrentAmps(2); // Channel 3
 
-  tempBuffer[bufferIndex] = convertToRange(tempCurrent, TEMP_MIN_MA, TEMP_MAX_MA, TEMP_MIN_F, TEMP_MAX_F);
-  rhBuffer[bufferIndex] = convertToRange(rhCurrent, RH_MIN_MA, RH_MAX_MA, RH_MIN, RH_MAX);
-  pressureBuffer[bufferIndex] = convertToRange(pressureCurrent, PRESSURE_MIN_MA, PRESSURE_MAX_MA, PRESSURE_MIN_PSI, PRESSURE_MAX_PSI);
+  adc0 = ads.readADC_SingleEnded(0);
+  adc1 = ads.readADC_SingleEnded(1);
+  adc2 = ads.readADC_SingleEnded(2);
+  adc3 = ads.readADC_SingleEnded(3);
+
+  volts0 = ads.computeVolts(adc0);
+  volts1 = ads.computeVolts(adc1);
+  volts2 = ads.computeVolts(adc2);
+  volts3 = ads.computeVolts(adc3);
+
+  tempCurrentRaw = (1000 * volts0) / 120;
+  rhCurrentRaw = (1000 * volts1) / 120;
+  pressureCurrentRaw = (1000 * volts2) / 120;
+  current3 = (1000 * volts3) / 120;
+
+  tempBuffer[bufferIndex] = analogScaling(tempCurrentRaw, TEMP_MIN_MA, TEMP_MAX_MA, TEMP_MIN_F, TEMP_MAX_F, TEMP_CAL_OFFSET);
+  rhBuffer[bufferIndex] = analogScaling(rhCurrentRaw, RH_MIN_MA, RH_MAX_MA, RH_MIN, RH_MAX, RH_CAL_OFFSET);
+  pressureBuffer[bufferIndex] = analogScaling(pressureCurrentRaw, PRESSURE_MIN_MA, PRESSURE_MAX_MA, PRESSURE_MIN_PSI, PRESSURE_MAX_PSI, PRESSURE_CAL_OFFSET);
 
   temperature = calculateAverage(tempBuffer, BUFFER_SIZE);
   humidity = calculateAverage(rhBuffer, BUFFER_SIZE);
   pressure = calculateAverage(pressureBuffer, BUFFER_SIZE);
 
   bufferIndex = (bufferIndex + 1) % BUFFER_SIZE;
+}
+
+void readAM2315()
+{
+  if (!am2315.readTemperatureAndHumidity(&temperature, &humidity))
+  {
+    Serial.println("Failed to read data from AM2315");
+    return;
+  }
 }
 
 void updateRelay()
@@ -250,7 +324,7 @@ void updateRelay()
 
 void updateDisplay()
 {
-  if (!rawRead)
+  if (rawRead)
   {
     display.clearDisplay();
     display.setTextSize(1.5);
@@ -259,17 +333,17 @@ void updateDisplay()
     display.setCursor(0, 0);
     display.print("Temp:");
     display.setCursor(60, 0);
-    display.printf("%6.1f F", temperature);
+    display.printf("%6.2f F", temperature);
 
     display.setCursor(0, 16);
     display.print("RH:");
     display.setCursor(60, 16);
-    display.printf("%6.1f %%", humidity);
+    display.printf("%6.2f %%", humidity);
 
     display.setCursor(0, 32);
     display.print("Press:");
     display.setCursor(60, 32);
-    display.printf("%6.1f psi", pressure);
+    display.printf("%6.2f psi", pressure);
 
     display.setCursor(0, 48);
     display.print("Relay:");
@@ -287,17 +361,17 @@ void updateDisplay()
     display.setCursor(0, 0);
     display.print("RawT:");
     display.setCursor(60, 0);
-    display.printf("%6.1f F", tempCurrent);
+    display.printf("%6.2f mA", tempCurrentRaw);
 
     display.setCursor(0, 16);
     display.print("RawRH:");
     display.setCursor(60, 16);
-    display.printf("%6.1f %%", rhCurrent);
+    display.printf("%6.2f mA", rhCurrentRaw);
 
     display.setCursor(0, 32);
     display.print("RawP:");
     display.setCursor(60, 32);
-    display.printf("%6.1f psi", pressureCurrent);
+    display.printf("%6.2f mA", pressureCurrentRaw);
 
     display.setCursor(0, 48);
     display.print("Relay:");
@@ -310,26 +384,55 @@ void updateDisplay()
 
 void serialDisplay()
 {
+  Serial.println("-----------------------------------------------------------");
+  Serial.print("AIN0: ");
+  Serial.print(adc0);
+  Serial.print("  ");
+  Serial.print(volts0, 4);
+  Serial.print("mV");
+  Serial.print("  ");
+  Serial.print("T(mA): ");
+  Serial.print(tempCurrentRaw);
+  Serial.print("  ");
   Serial.print("T: ");
-  Serial.print(temperature);
-  Serial.print("  ");
-  Serial.print("RH: ");
-  Serial.print(humidity);
-  Serial.print("  ");
-  Serial.print("P: ");
-  Serial.print(pressure);
-  Serial.print("  ");
+  Serial.println(temperature);
 
-  Serial.print("T: ");
-  Serial.print(tempCurrent);
+  Serial.print("AIN1: ");
+  Serial.print(adc1);
+  Serial.print("  ");
+  Serial.print(volts1, 4);
+  Serial.print("mV");
+  Serial.print("  ");
+  Serial.print("RH(mA): ");
+  Serial.print(rhCurrentRaw);
   Serial.print("  ");
   Serial.print("RH: ");
-  Serial.print(humidity);
+  Serial.println(humidity);
+
+  Serial.print("AIN2: ");
+  Serial.print(adc2);
   Serial.print("  ");
-  Serial.print("P: ");
-  Serial.print(pressureCurrent);
-  Serial.println("  ");
+  Serial.print(volts2, 4);
+  Serial.print("mV");
+  Serial.print("  ");
+  Serial.print("RH(mA): ");
+  Serial.print(pressureCurrentRaw);
+  Serial.print("  ");
+  Serial.print("RH: ");
+  Serial.println(pressure);
+
+  Serial.print("AIN3: ");
+  Serial.print(adc3);
+  Serial.print("  ");
+  Serial.print(volts3);
+  Serial.println("V");
+
+  Serial.print("Temp *C: ");
+  Serial.print(am2315Temperature);
+  Serial.print("RH %: ");
+  Serial.println(am2315humidity);
 }
+
 // void publishToMQTT()
 // {
 //   if (!client.connected())
@@ -349,12 +452,19 @@ void loop()
 {
   unsigned long currentTime = millis();
 
-  // Sensors reading and
+  // Sensors reading
   if (currentTime - lastSensorReadTime >= sensorReadInterval)
   {
     lastSensorReadTime = currentTime;
     readSensors();
     updateRelay();
+  }
+
+  // AM2315 reading
+  if (currentTime - lastAM2315ReadTime >= AM2315ReadInterval)
+  {
+    lastAM2315ReadTime = currentTime;
+    readAM2315();
   }
 
   // MQTT Broker
@@ -375,7 +485,7 @@ void loop()
   if (currentTime - lastSerialUpdateTime >= displayUpdateInterval)
   {
     lastSerialUpdateTime = currentTime;
-    updateDisplay();
+    serialDisplay();
   }
 
   // Button state
